@@ -942,6 +942,18 @@ def audio_autoconnect():
         required_routes[hp_ports[0].name] = required_routes[hw_audio_dst_ports[0].name]
         required_routes[hp_ports[1].name] = required_routes[hw_audio_dst_ports[1].name]
 
+    # Replicate main output to hotplug audio output devices (e.g. USB gadget)
+    zynaout_ports = jclient.get_ports("zynaout_", is_input=True, is_audio=True)
+    seen_clients = set()
+    for port in zynaout_ports:
+        client = port.name.split(":")[0]
+        if client not in seen_clients:
+            seen_clients.add(client)
+            client_ports = jclient.get_ports(client, is_input=True, is_audio=True)
+            if len(client_ports) >= 2:
+                required_routes[client_ports[0].name] = required_routes[hw_audio_dst_ports[0].name]
+                required_routes[client_ports[1].name] = required_routes[hw_audio_dst_ports[1].name]
+
     # Connect and disconnect routes
     for dst, sources in required_routes.items():
         if dst not in zyn_routed_audio:
@@ -1026,6 +1038,9 @@ def update_hw_audio_ports():
             except:
                 continue
     if dirty:
+        # Refresh hardware output ports list to include new zynaout devices
+        global hw_audio_dst_ports
+        hw_audio_dst_ports = get_hw_audio_dst_ports()
         # Rebuild chain audio routes
         try:
             sleep(0.5) # Have to wait for jack to finish registering ports
@@ -1039,14 +1054,14 @@ def update_hw_audio_ports():
 
 def enable_hotplug():
     zynthian_gui_config.hotplug_audio_enabled = True
-    zynconf.save_config({"ZYNTHIAN_HOTPLUG_AUDIO": str(zynthian_gui_config.hotplug_audio_enabled)}, True)
+    zynconf.save_config({"ZYNTHIAN_HOTPLUG_AUDIO": "1"}, True)
     update_hw_audio_ports()
     audio_autoconnect()
 
 
 def disable_hotplug():
     zynthian_gui_config.hotplug_audio_enabled = False
-    zynconf.save_config({"ZYNTHIAN_HOTPLUG_AUDIO": str(zynthian_gui_config.hotplug_audio_enabled)}, True)
+    zynconf.save_config({"ZYNTHIAN_HOTPLUG_AUDIO": "0"}, True)
     stop_all_alsa_in_out()
 
 
@@ -1175,7 +1190,10 @@ def get_audio_capture_ports():
         for port in list(ports):
             if port.name in ["system:capture_1", "system:capture_2"]:
                 ports.remove(port)
-    return ports + jclient.get_ports("zynain", is_output=True, is_audio=True)
+    ports += jclient.get_ports("zynain", is_output=True, is_audio=True)
+    # Include AirPlay bridge if present
+    ports += jclient.get_ports("airplay:capture", is_output=True, is_audio=True)
+    return ports
 
 
 def build_midi_port_name(port):

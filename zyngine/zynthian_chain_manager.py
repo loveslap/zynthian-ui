@@ -36,6 +36,9 @@ from zyngine.zynthian_engine_jalv import *
 from zyngine.zynthian_engine_pianoteq import *
 from zyngine.zynthian_signal_manager import zynsigman
 from zyngine.zynthian_processor import zynthian_processor
+from zyngine.zynthian_engine_grooveslap import zynthian_engine_grooveslap
+from zyngine.zynthian_engine_beatclock import zynthian_engine_beatclock
+from zyngine.zynthian_engine_airplay import zynthian_engine_airplay
 from zyngui import zynthian_gui_config
 
 # ----------------------------------------------------------------------------
@@ -73,7 +76,10 @@ engine2class = {
     'MC': zynthian_engine_midi_control,
     'PD': zynthian_engine_puredata,
     'MD': zynthian_engine_modui,
-    'IR': zynthian_engine_inet_radio
+    'IR': zynthian_engine_inet_radio,
+    'GS': zynthian_engine_grooveslap,
+    'BC': zynthian_engine_beatclock,
+    'AR': zynthian_engine_airplay
 }
 
 # ----------------------------------------------------------------------------

@@ -165,7 +165,10 @@ standalone_engine_info = {
     'MC': ["MIDI Control", "MIDI Control External", "MIDI Tool", "Other", True],
     'IR': ["InternetRadio", "Internet Radio", "Audio Generator", "Other", True],
     'PD': ["PureData", "PureData - Visual Programming", "Special", "Language", True],
-    'MD': ["MOD-UI", "MOD-UI - Plugin Host", "Special", "Language", True]
+    'MD': ["MOD-UI", "MOD-UI - Plugin Host", "Special", "Language", True],
+    'GS': ["GrooveSlap", "GrooveSlap Live - Harmonic Animation", "MIDI Tool", "Other", True],
+    'BC': ["BeatClock", "BeatClock - Audio to MIDI Clock", "Special", "Other", True],
+    'AR': ["AirPlay", "AirPlay Audio Receiver", "Audio Generator", "Other", True]
 }
 
 rpi5_plugins = [

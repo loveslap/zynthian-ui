@@ -65,7 +65,8 @@ class zynthian_engine_grooveslap(zynthian_engine):
         ['inv lfo wave', {'name': 'inv lfo wave', 'value': 0, 'value_max': 4, 'labels': ['sine', 'tri', 'square', 'ramp_up', 'ramp_dn']}],
         ['inv lfo amp', {'name': 'inv lfo amp', 'value': 50, 'value_min': 0, 'value_max': 100}],
 
-        ['clock source', {'name': 'clock source', 'value': 0, 'value_max': 2, 'labels': ['tight', 'loose', 'MIDI clk']}],
+        ['clock source', {'name': 'clock source', 'value': 2, 'value_max': 3, 'labels': ['tight', 'loose', 'internal', 'MIDI clk']}],
+        ['bpm', {'name': 'bpm', 'value': 120, 'value_min': 30, 'value_max': 300}],
         ['cycles', {'name': 'cycles', 'value': 4, 'value_min': 1, 'value_max': 24}],
         ['beatspan', {'name': 'beatspan', 'value': 1, 'value_min': 1, 'value_max': 8}],
         ['cc param', {'name': 'cc param', 'value': 0, 'value_min': -40, 'value_max': 127}],
@@ -82,7 +83,7 @@ class zynthian_engine_grooveslap(zynthian_engine):
 
     _ctrl_screens = [
         ['main', ['inversion', 'duration', 'velocity', 'cc param']],
-        ['rhythm', ['cycles', 'beatspan', 'clock source']],
+        ['rhythm', ['cycles', 'beatspan', 'clock source', 'bpm']],
         ['inv lfo', ['inv lfo shape', 'inv lfo num', 'inv lfo den', 'inv lfo amp']],
         ['dur lfo', ['dur lfo shape', 'dur lfo num', 'dur lfo den']],
         ['cc lfo', ['cc lfo shape', 'cc lfo num', 'cc lfo den']],
@@ -273,11 +274,27 @@ class zynthian_engine_grooveslap(zynthian_engine):
             self.stop()
 
     def _connect_audio_input(self):
-        """Connect audio sources to gs_capture for beat detection."""
+        """Connect all available audio capture sources to gs_capture for beat detection.
+
+        Connects: USB audio gadget, AirPlay bridge, system capture (HiFiBerry ADC),
+        and any hotplug zynain_* devices. All sources are mixed into the single
+        mono beat detection input — whichever is playing gets detected.
+        """
         import subprocess
         audio_port = f"gs-audio-{self.jackname}:audio_in"
-        # Try AirPlay first (via loopback bridge), then system capture
-        for src in ("airplay:capture_1", "system:capture_1"):
+        # All possible audio sources for beat detection
+        sources = ["zynain_UAC2Gadget:capture_1", "airplay:capture_1", "system:capture_1"]
+        # Also pick up any other zynain_* hotplug devices
+        try:
+            result = subprocess.run(
+                ["jack_lsp"], timeout=2, capture_output=True, text=True
+            )
+            for line in result.stdout.splitlines():
+                if line.startswith("zynain_") and ":capture_1" in line and line not in sources:
+                    sources.append(line)
+        except Exception:
+            pass
+        for src in sources:
             try:
                 subprocess.run(
                     ["jack_connect", src, audio_port],
@@ -319,6 +336,9 @@ class zynthian_engine_grooveslap(zynthian_engine):
 
         elif zctrl.symbol == 'clock source':
             self._send_osc("/gs/clock_source", int(zctrl.value))
+
+        elif zctrl.symbol == 'bpm':
+            self._send_osc("/gs/bpm", float(zctrl.value))
 
     # ---------------------------------------------------------------------------
     # Bank & Preset Management
