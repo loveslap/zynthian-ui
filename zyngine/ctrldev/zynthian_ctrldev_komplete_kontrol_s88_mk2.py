@@ -42,7 +42,8 @@ class zynthian_ctrldev_komplete_kontrol_s88_mk2(zynthian_ctrldev_base):
 
     dev_ids = ["KOMPLETE KONTROL S88 MK2 MIDI 2"]
     driver_description = "Native HID/display bridge (qKontrol-derived)"
-    autoload_flag = False
+    # Safe to autoload: this exact dev_id is the S88 MIDI 2 control port, not the keybed.
+    autoload_flag = True
     unroute_from_chains = True
 
     CUIA_MAP = {
