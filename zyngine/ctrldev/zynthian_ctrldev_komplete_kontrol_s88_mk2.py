@@ -63,6 +63,8 @@ class zynthian_ctrldev_komplete_kontrol_s88_mk2(zynthian_ctrldev_base):
         self._stop = threading.Event()
         self._thread = None
         self._last_display_update = 0
+        self._param_bank = 0
+        self._last_knobs8 = None
 
     def init(self):
         if S88Bridge is None:
@@ -103,28 +105,30 @@ class zynthian_ctrldev_komplete_kontrol_s88_mk2(zynthian_ctrldev_base):
             return
         self._last_display_update = now
         try:
-            title, preset = self._get_active_context()
-            left = text_image(
-                "S88 ↔ Zynthian",
-                [
-                    f"Chain: {title}",
-                    f"Preset: {preset}",
-                    "Keys: MIDI 1 routed to chains",
-                    "HID: Play Stop Rec Clear",
-                ],
-                (255, 0, 255),
-            )
-            right = text_image(
-                "Controls v0",
-                [
-                    "Clear  → All Notes Off",
-                    "Play   → Audio Play",
-                    "Stop   → Audio Stop",
-                    "Record → Audio Record",
-                    "Pages  → Left / Right",
-                ],
-                (0, 255, 255),
-            )
+            title, preset, proc_name = self._get_active_context()
+            zctrls = self._get_bank_zctrls()
+            left_lines = [
+                f"Chain: {title}",
+                f"Preset: {preset}",
+                f"Proc: {proc_name}",
+                f"Bank: {self._param_bank + 1}",
+            ]
+            right_lines = []
+            if zctrls:
+                for i, zctrl in enumerate(zctrls[:4]):
+                    left_lines.append(f"K{i + 1}: {self._format_zctrl(zctrl)}")
+                for i, zctrl in enumerate(zctrls[4:8], start=5):
+                    right_lines.append(f"K{i}: {self._format_zctrl(zctrl)}")
+            else:
+                left_lines.append("No active params")
+                right_lines.append("Add/select a chain")
+            right_lines.extend([
+                "Plugin/MIDI: param bank +/-",
+                "Clear: All Notes Off",
+                "Play/Stop/Rec: transport",
+            ])
+            left = text_image("S88 ↔ Zynthian", left_lines, (255, 0, 255))
+            right = text_image("Active Params", right_lines, (0, 255, 255))
             self.bridge.send_display(0, left)
             self.bridge.send_display(1, right)
         except Exception as e:
@@ -133,22 +137,90 @@ class zynthian_ctrldev_komplete_kontrol_s88_mk2(zynthian_ctrldev_base):
     def _get_active_context(self):
         title = "-"
         preset = "-"
+        proc_name = "-"
         try:
             chain = self.chain_manager.get_active_chain()
+            proc = self._get_active_processor(chain)
             if chain:
                 try:
                     title = chain.get_title()
                 except Exception:
                     title = str(getattr(chain, "chain_id", "active"))
+            if proc:
                 try:
-                    proc = chain.get_current_processor()
-                    if proc:
-                        preset = getattr(proc, "preset_name", None) or getattr(proc, "bank_name", None) or "-"
+                    proc_name = proc.get_name()
                 except Exception:
-                    pass
+                    proc_name = str(getattr(proc, "id", "active"))
+                try:
+                    preset = proc.get_preset_name()
+                except Exception:
+                    preset = getattr(proc, "preset_name", None) or getattr(proc, "bank_name", None) or "-"
         except Exception:
             pass
-        return title, preset
+        return title, preset, proc_name
+
+    def _get_active_processor(self, chain=None):
+        try:
+            if chain is None:
+                chain = self.chain_manager.get_active_chain()
+            if not chain:
+                return None
+            proc = getattr(chain, "current_processor", None)
+            if proc:
+                return proc
+            procs = chain.get_processors()
+            if procs:
+                return procs[0]
+        except Exception as e:
+            logging.debug("S88 can't get active processor => %s", e)
+        return None
+
+    def _get_param_zctrls(self):
+        proc = self._get_active_processor()
+        if not proc:
+            return []
+        ctrls = getattr(proc, "controllers_dict", {}) or {}
+        zctrls = []
+        for zctrl in ctrls.values():
+            if getattr(zctrl, "not_on_gui", False):
+                continue
+            if getattr(zctrl, "readonly", False):
+                continue
+            if getattr(zctrl, "is_path", False):
+                continue
+            zctrls.append(zctrl)
+        zctrls.sort(key=lambda z: (-getattr(z, "display_priority", 0), getattr(z, "name", getattr(z, "symbol", ""))))
+        return zctrls
+
+    def _get_bank_zctrls(self):
+        zctrls = self._get_param_zctrls()
+        if not zctrls:
+            self._param_bank = 0
+            return []
+        max_bank = max(0, (len(zctrls) - 1) // 8)
+        if self._param_bank > max_bank:
+            self._param_bank = max_bank
+        start = self._param_bank * 8
+        return zctrls[start:start + 8]
+
+    def _format_zctrl(self, zctrl):
+        name = getattr(zctrl, "short_name", None) or getattr(zctrl, "name", None) or getattr(zctrl, "symbol", "?")
+        value = getattr(zctrl, "value", None)
+        label = None
+        try:
+            value2label = getattr(zctrl, "value2label", None)
+            if value2label:
+                label = value2label.get(str(value))
+        except Exception:
+            label = None
+        if label is None:
+            try:
+                label = zctrl.get_value2label()
+            except Exception:
+                label = value
+        if isinstance(label, float):
+            label = f"{label:.3g}"
+        return f"{name}: {label}"
 
     def _hid_loop(self):
         try:
@@ -169,6 +241,12 @@ class zynthian_ctrldev_komplete_kontrol_s88_mk2(zynthian_ctrldev_base):
     def _handle_hid_event(self, event):
         logging.debug("S88 HID event kind=%s name=%s value=%s", event.kind, event.name, event.value)
         if event.kind == "button":
+            if event.name == "plugin":
+                self._change_param_bank(1)
+                return
+            if event.name == "midi":
+                self._change_param_bank(-1)
+                return
             cuia = self.CUIA_MAP.get(event.name)
             if cuia:
                 self.state_manager.send_cuia(cuia)
@@ -183,6 +261,75 @@ class zynthian_ctrldev_komplete_kontrol_s88_mk2(zynthian_ctrldev_base):
             }.get(event.name)
             if cuia:
                 self.state_manager.send_cuia(cuia)
+                self.refresh()
+        elif event.kind == "knobs8":
+            self._handle_knobs8(event.value)
         elif event.kind == "knob":
-            # v0: prove decoding only. Parameter control comes next after deciding active-chain API.
-            pass
+            # Some S88 states only expose a coarse byte-30 stream; treat it as a nudge
+            # on the first visible parameter until we map per-knob IDs from longer packets.
+            self._handle_single_knob(event.value)
+
+    def _change_param_bank(self, delta):
+        zctrls = self._get_param_zctrls()
+        if not zctrls:
+            self._param_bank = 0
+        else:
+            max_bank = max(0, (len(zctrls) - 1) // 8)
+            self._param_bank = max(0, min(max_bank, self._param_bank + delta))
+        self.refresh()
+
+    def _handle_knobs8(self, values):
+        if not isinstance(values, list):
+            return
+        zctrls = self._get_bank_zctrls()
+        if not zctrls:
+            return
+        if self._last_knobs8 is None:
+            # First report establishes pickup state; don't jump parameters on attach.
+            self._last_knobs8 = list(values)
+            return
+        for i, raw_val in enumerate(values[:len(zctrls)]):
+            try:
+                prev = self._last_knobs8[i]
+            except Exception:
+                prev = raw_val
+            if raw_val == prev:
+                continue
+            self._set_zctrl_from_7bit(zctrls[i], raw_val)
+        self._last_knobs8 = list(values)
+        self.refresh()
+
+    def _handle_single_knob(self, value):
+        zctrls = self._get_bank_zctrls()
+        if not zctrls or not isinstance(value, int):
+            return
+        # The 32-byte fallback stream is not yet per-knob; use relative motion of byte30.
+        last = getattr(self, "_last_single_knob", None)
+        self._last_single_knob = value
+        if last is None or value == last:
+            return
+        delta = 1 if ((value - last) & 0x7f) < 64 else -1
+        try:
+            zctrls[0].nudge(delta)
+            self.refresh()
+        except Exception as e:
+            logging.debug("S88 single-knob nudge failed => %s", e)
+
+    def _set_zctrl_from_7bit(self, zctrl, raw_val):
+        raw_val = max(0, min(127, int(raw_val)))
+        try:
+            if getattr(zctrl, "ticks", None):
+                ticks = zctrl.ticks
+                index = round(raw_val * (len(ticks) - 1) / 127)
+                zctrl.set_value(ticks[index])
+                return
+            value_min = getattr(zctrl, "value_min", 0)
+            value_max = getattr(zctrl, "value_max", 127)
+            if value_min is None:
+                value_min = 0
+            if value_max is None:
+                value_max = 127
+            value = value_min + (raw_val / 127.0) * (value_max - value_min)
+            zctrl.set_value(value)
+        except Exception as e:
+            logging.debug("S88 set param failed for %s => %s", getattr(zctrl, "symbol", zctrl), e)
