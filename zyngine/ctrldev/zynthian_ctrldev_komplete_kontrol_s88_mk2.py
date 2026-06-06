@@ -85,6 +85,7 @@ class zynthian_ctrldev_komplete_kontrol_s88_mk2(zynthian_ctrldev_base):
         self._last_event = "boot"
         self._last_cuia = "-"
         self._last_action_time = time.monotonic()
+        self._last_param_display_refresh = 0
 
     def init(self):
         if S88Bridge is None:
@@ -132,7 +133,7 @@ class zynthian_ctrldev_komplete_kontrol_s88_mk2(zynthian_ctrldev_base):
                     self._last_event = f"midi-cc:knob{index + 1}={ccval}"
                     self._last_cuia = "PARAM_CC"
                     self._last_action_time = time.monotonic()
-                    self.refresh(force=True)
+                    self._refresh_after_param_change()
                     return True
         return False
 
@@ -159,6 +160,7 @@ class zynthian_ctrldev_komplete_kontrol_s88_mk2(zynthian_ctrldev_base):
         if not force and now - self._last_display_update < 0.5:
             return
         self._last_display_update = now
+        started = time.monotonic()
         try:
             if self._display_page == 1:
                 left_title, left_lines, right_title, right_lines = self._build_transport_page()
@@ -171,8 +173,25 @@ class zynthian_ctrldev_komplete_kontrol_s88_mk2(zynthian_ctrldev_base):
                 accent = (0, 255, 255)
             self.bridge.send_display(0, text_image(left_title, left_lines, accent))
             self.bridge.send_display(1, text_image(right_title, right_lines, accent))
+            elapsed = time.monotonic() - started
+            if elapsed > 0.15:
+                logging.debug("S88 display refresh took %.3fs", elapsed)
         except Exception as e:
             logging.warning("S88 display refresh failed => %s", e)
+
+    def _refresh_after_param_change(self):
+        """Keep knob-to-Zynthian control immediate by not repainting per HID frame.
+
+        A full S88 repaint pushes two ~261 KB USB bitmap transfers. Doing that for
+        every knob report starves the HID/control loop and makes the Zynthian UI
+        feel seconds behind. Parameter writes are the real-time path; the S88
+        display is only an occasional status mirror during continuous knob motion.
+        """
+        now = time.monotonic()
+        if now - self._last_param_display_refresh < 1.0:
+            return
+        self._last_param_display_refresh = now
+        self.refresh(force=False)
 
     def _build_param_page(self):
         title, preset, proc_name = self._get_active_context()
@@ -466,7 +485,7 @@ class zynthian_ctrldev_komplete_kontrol_s88_mk2(zynthian_ctrldev_base):
                 continue
             self._set_zctrl_from_7bit(zctrls[i], raw_val)
         self._last_knobs8 = list(values)
-        self.refresh(force=True)
+        self._refresh_after_param_change()
 
     def _handle_single_knob(self, value):
         zctrls = self._get_bank_zctrls()
@@ -480,7 +499,7 @@ class zynthian_ctrldev_komplete_kontrol_s88_mk2(zynthian_ctrldev_base):
         delta = 1 if ((value - last) & 0x7f) < 64 else -1
         try:
             zctrls[0].nudge(delta)
-            self.refresh(force=True)
+            self._refresh_after_param_change()
         except Exception as e:
             logging.debug("S88 single-knob nudge failed => %s", e)
 
