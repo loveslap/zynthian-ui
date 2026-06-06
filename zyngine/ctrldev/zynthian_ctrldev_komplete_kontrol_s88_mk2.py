@@ -213,7 +213,7 @@ class zynthian_ctrldev_komplete_kontrol_s88_mk2(zynthian_ctrldev_base):
             right_lines.append("Add/select a chain")
         right_lines.extend([
             "Top CCs: system-owned",
-            "CC pass-through: manual only",
+            "Knob MIDI CCs: off",
             self._event_status_line(),
         ])
         controls = self._top_button_legend()

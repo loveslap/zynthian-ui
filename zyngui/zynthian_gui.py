@@ -29,6 +29,10 @@ import ffmpeg
 import logging
 import traceback
 import importlib
+try:
+    import rtmidi
+except Exception:
+    rtmidi = None
 from time import sleep
 from queue import Empty
 from pathlib import Path
@@ -187,6 +191,9 @@ class zynthian_gui:
         self.osc_heartbeat_timeout = 120  # Heartbeat timeout period
 
         self.prog_change = [0] * 16 # Track last program change for each MIDI channel
+        self._external_clock_stop = Event()
+        self._external_clock_thread = None
+        self._external_clock_outputs = []
 
     # ---------------------------------------------------------------------------
     # Capture Log
@@ -1191,21 +1198,131 @@ class zynthian_gui:
         else:
             self.state_manager.audio_recorder.toggle_recording()
 
+    def _get_external_clock_tempo(self):
+        try:
+            tempo = float(self.state_manager.zynseq.get_tempo())
+            if tempo > 0:
+                return tempo
+        except Exception:
+            pass
+        return 120.0
+
+    def _open_external_clock_outputs(self):
+        if rtmidi is None:
+            logging.warning("External clock fanout unavailable: python-rtmidi is not installed")
+            return []
+        try:
+            probe = rtmidi.MidiOut()
+            ports = probe.get_ports()
+            del probe
+        except Exception as e:
+            logging.warning("Can't list MIDI output ports for external clock fanout => %s", e)
+            return []
+        wanted = ("HAPAX", "TASCAM", "Studio Bridge")
+        outputs = []
+        for i, name in enumerate(ports):
+            if any(token.lower() in name.lower() for token in wanted):
+                try:
+                    out = rtmidi.MidiOut()
+                    out.open_port(i)
+                    outputs.append((name, out))
+                    logging.info("External clock fanout opened MIDI output '%s'", name)
+                except Exception as e:
+                    logging.warning("Can't open external clock MIDI output '%s' => %s", name, e)
+        if not outputs:
+            logging.warning("External clock fanout found no HAPAX/TASCAM MIDI output ports among: %s", ports)
+        return outputs
+
+    def _send_external_clock_msg(self, msg):
+        live = []
+        for name, out in self._external_clock_outputs:
+            try:
+                out.send_message(msg)
+                live.append((name, out))
+            except Exception as e:
+                logging.warning("External clock fanout send failed on '%s' => %s", name, e)
+        self._external_clock_outputs = live
+
+    def _external_clock_task(self):
+        # MIDI clock is 24 PPQN. Re-read tempo each pulse so tempo changes follow.
+        next_pulse = monotonic()
+        while not self._external_clock_stop.is_set():
+            self._send_external_clock_msg([0xF8])
+            bpm = self._get_external_clock_tempo()
+            interval = 60.0 / (bpm * 24.0)
+            next_pulse += interval
+            delay = max(0.001, next_pulse - monotonic())
+            self._external_clock_stop.wait(delay)
+
+    def _start_midi_clock_fanout(self):
+        if self._external_clock_thread and self._external_clock_thread.is_alive():
+            return
+        self._external_clock_outputs = self._open_external_clock_outputs()
+        if not self._external_clock_outputs:
+            return
+        self._external_clock_stop.clear()
+        self._send_external_clock_msg([0xFA])  # MIDI Start
+        self._external_clock_thread = Thread(target=self._external_clock_task, name="external-clock-fanout", daemon=True)
+        self._external_clock_thread.start()
+
+    def _stop_midi_clock_fanout(self):
+        self._external_clock_stop.set()
+        if self._external_clock_thread and self._external_clock_thread.is_alive():
+            self._external_clock_thread.join(timeout=0.5)
+        self._send_external_clock_msg([0xFC])  # MIDI Stop
+        for name, out in self._external_clock_outputs:
+            try:
+                out.close_port()
+            except Exception:
+                pass
+        self._external_clock_outputs = []
+        self._external_clock_thread = None
+
+    def _start_external_transport(self, client="zynthian-ui"):
+        """Start external rigs (Hapax/TASCAM/etc.) from Zynthian/S88 Play.
+
+        Zynthian's audio play CUIA can be used as the live-rig PLAY button even
+        when no local audio file is loaded. We ask ZynSeq/JACK transport to roll
+        and also send direct MIDI Start + 24 PPQN clock to HAPAX/TASCAM ALSA
+        MIDI outputs. The direct fanout is intentional: it makes S88/Zynthian
+        Play reliable even when JACK transport clients don't emit MIDI clock.
+        """
+        try:
+            self.state_manager.zynseq.transport_start(client)
+        except Exception as e:
+            logging.warning("Can't start external transport => %s", e)
+        self._start_midi_clock_fanout()
+
+    def _stop_external_transport(self, client="zynthian-ui"):
+        try:
+            self.state_manager.zynseq.transport_stop(client)
+        except Exception as e:
+            logging.warning("Can't stop external transport => %s", e)
+        self._stop_midi_clock_fanout()
+
     def cuia_start_audio_play(self, params=None):
         self.state_manager.start_audio_player()
+        self._start_external_transport()
 
     def cuia_stop_audio_play(self, params=None):
         if self.current_screen == "pattern_editor":
             self.screens["pattern_editor"].stop_playback()
         else:
             self.state_manager.stop_audio_player(reset_pos=True)
+        self._stop_external_transport()
 
     def cuia_toggle_audio_play(self, params=None):
         # TODO: This logic should not be here
         if self.current_screen == "pattern_editor":
             self.screens["pattern_editor"].toggle_playback()
+            self.state_manager.zynseq.transport_toggle("zynthian-ui")
         else:
+            was_playing = bool(getattr(self.state_manager, "status_audio_player", False))
             self.state_manager.toggle_audio_player()
+            if was_playing:
+                self._stop_external_transport()
+            else:
+                self._start_external_transport()
 
     def cuia_audio_file_list(self, params=None):
         self.show_screen("audio_player")

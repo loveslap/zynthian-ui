@@ -2347,6 +2347,7 @@ class zynthian_state_manager:
     def stop_midi_playback(self):
         if libsmf.getPlayState() != zynsmf.PLAY_STATE_STOPPED:
             libsmf.stopPlayback()
+            self.zynseq.transport_stop("zynsmf")
             self.status_midi_player = False
             zynsigman.send(zynsigman.S_STATE_MAN, self.SS_MIDI_PLAYER_STATE, state=False)
         return self.status_midi_player
