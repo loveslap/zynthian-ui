@@ -11,6 +11,7 @@
 
 import logging
 import os
+import re
 import sys
 import threading
 import time
@@ -23,10 +24,12 @@ if S88_BRIDGE_DIR not in sys.path:
     sys.path.insert(0, S88_BRIDGE_DIR)
 
 try:
-    from s88_zynthian_bridge import S88Bridge, text_image
+    from s88_zynthian_bridge import S88Bridge, text_image, TOP_BUTTON_CC, TOP_KNOB_CC
 except Exception as e:
     S88Bridge = None
     text_image = None
+    TOP_BUTTON_CC = [102, 103, 104, 105, 106, 107, 108, 109]
+    TOP_KNOB_CC = [70, 71, 72, 73, 74, 75, 76, 77]
     logging.error("Can't import S88Bridge from %s => %s", S88_BRIDGE_DIR, e)
 
 
@@ -40,7 +43,7 @@ class zynthian_ctrldev_komplete_kontrol_s88_mk2(zynthian_ctrldev_base):
     - Keep this attached to MIDI 2 only; MIDI 1 keybed remains routed.
     """
 
-    dev_ids = ["KOMPLETE KONTROL S88 MK2 MIDI 2"]
+    dev_ids = ["KOMPLETE KONTROL S88 MK2 MIDI 2", "KOMPLETE KONTROL S88 MK2 IN 2"]
     driver_description = "Native HID/display bridge (qKontrol-derived)"
     # Safe to autoload: this exact dev_id is the S88 MIDI 2 control port, not the keybed.
     autoload_flag = True
@@ -58,6 +61,17 @@ class zynthian_ctrldev_komplete_kontrol_s88_mk2(zynthian_ctrldev_base):
         "page_right_or_device_plus": "ARROW_RIGHT",
     }
 
+    TOP_BUTTON_ACTIONS = {
+        0: "BANK_PREV",
+        1: "BANK_NEXT",
+        2: "ARROW_LEFT",
+        3: "ARROW_RIGHT",
+        4: "ARROW_UP",
+        5: "ARROW_DOWN",
+        6: "DISPLAY_PAGE",
+        7: "ALL_NOTES_OFF",
+    }
+
     def __init__(self, state_manager, idev_in, idev_out=None):
         super().__init__(state_manager, idev_in, idev_out)
         self.bridge = None
@@ -65,7 +79,12 @@ class zynthian_ctrldev_komplete_kontrol_s88_mk2(zynthian_ctrldev_base):
         self._thread = None
         self._last_display_update = 0
         self._param_bank = 0
+        self._display_page = 0
+        self._display_page_count = 3
         self._last_knobs8 = None
+        self._last_event = "boot"
+        self._last_cuia = "-"
+        self._last_action_time = time.monotonic()
 
     def init(self):
         if S88Bridge is None:
@@ -73,8 +92,8 @@ class zynthian_ctrldev_komplete_kontrol_s88_mk2(zynthian_ctrldev_base):
             return
         try:
             self.bridge = S88Bridge()
-            self.bridge.wake()
-            self.refresh()
+            self._apply_button_lights(['plugin', 'midi', 'loop'])
+            self.refresh(force=True)
             self._thread = threading.Thread(target=self._hid_loop, name="s88-hid-loop", daemon=True)
             self._thread.start()
             logging.info("Komplete Kontrol S88 MK2 HID/display bridge started")
@@ -95,45 +114,172 @@ class zynthian_ctrldev_komplete_kontrol_s88_mk2(zynthian_ctrldev_base):
         logging.info("Komplete Kontrol S88 MK2 HID/display bridge stopped")
 
     def midi_event(self, ev):
-        # MIDI 2 handling is intentionally empty for v0. The useful controls are HID.
+        evtype = (ev[0] >> 4) & 0x0F
+        if evtype == 0xB:
+            ccnum = ev[1] & 0x7F
+            ccval = ev[2] & 0x7F
+            if ccnum in TOP_BUTTON_CC:
+                if ccval > 0:
+                    index = TOP_BUTTON_CC.index(ccnum)
+                    action = self.TOP_BUTTON_ACTIONS.get(index)
+                    self._handle_top_button(index, action, ccval)
+                return True
+            if ccnum in TOP_KNOB_CC:
+                index = TOP_KNOB_CC.index(ccnum)
+                zctrls = self._get_bank_zctrls()
+                if index < len(zctrls):
+                    self._set_zctrl_from_7bit(zctrls[index], ccval)
+                    self._last_event = f"midi-cc:knob{index + 1}={ccval}"
+                    self._last_cuia = "PARAM_CC"
+                    self._last_action_time = time.monotonic()
+                    self.refresh(force=True)
+                    return True
         return False
 
-    def refresh(self):
+    def _handle_top_button(self, index, action, value=127):
+        self._last_event = f"top{index + 1}:{action}={value}"
+        self._last_cuia = action or "-"
+        self._last_action_time = time.monotonic()
+        if action == "BANK_PREV":
+            self._change_param_bank(-1)
+        elif action == "BANK_NEXT":
+            self._change_param_bank(1)
+        elif action == "DISPLAY_PAGE":
+            self._cycle_display_page(1)
+        elif action:
+            self._send_cuia(action)
+            self.refresh(force=True)
+        else:
+            self.refresh(force=True)
+
+    def refresh(self, force=False):
         if not self.bridge or text_image is None:
             return
         now = time.monotonic()
-        if now - self._last_display_update < 0.5:
+        if not force and now - self._last_display_update < 0.5:
             return
         self._last_display_update = now
         try:
-            title, preset, proc_name = self._get_active_context()
-            zctrls = self._get_bank_zctrls()
-            left_lines = [
-                f"Chain: {title}",
-                f"Preset: {preset}",
-                f"Proc: {proc_name}",
-                f"Bank: {self._param_bank + 1}",
-            ]
-            right_lines = []
-            if zctrls:
-                for i, zctrl in enumerate(zctrls[:4]):
-                    left_lines.append(f"K{i + 1}: {self._format_zctrl(zctrl)}")
-                for i, zctrl in enumerate(zctrls[4:8], start=5):
-                    right_lines.append(f"K{i}: {self._format_zctrl(zctrl)}")
+            if self._display_page == 1:
+                left_title, left_lines, right_title, right_lines = self._build_transport_page()
+                accent = (255, 180, 0)
+            elif self._display_page == 2:
+                left_title, left_lines, right_title, right_lines = self._build_routing_page()
+                accent = (120, 180, 255)
             else:
-                left_lines.append("No active params")
-                right_lines.append("Add/select a chain")
-            right_lines.extend([
-                "Plugin/MIDI: param bank +/-",
-                "Clear: All Notes Off",
-                "Play/Stop/Rec: transport",
-            ])
-            left = text_image("S88 ↔ Zynthian", left_lines, (255, 0, 255))
-            right = text_image("Active Params", right_lines, (0, 255, 255))
-            self.bridge.send_display(0, left)
-            self.bridge.send_display(1, right)
+                left_title, left_lines, right_title, right_lines = self._build_param_page()
+                accent = (0, 255, 255)
+            self.bridge.send_display(0, text_image(left_title, left_lines, accent))
+            self.bridge.send_display(1, text_image(right_title, right_lines, accent))
         except Exception as e:
             logging.warning("S88 display refresh failed => %s", e)
+
+    def _build_param_page(self):
+        title, preset, proc_name = self._get_active_context()
+        zctrls = self._get_bank_zctrls()
+        left_lines = [
+            f"Chain: {title}",
+            f"Preset: {preset}",
+            f"Proc: {proc_name}",
+            f"Bank: {self._param_bank + 1}",
+        ]
+        right_lines = []
+        if zctrls:
+            for i, zctrl in enumerate(zctrls[:4]):
+                left_lines.append(f"K{i + 1}: {self._format_zctrl(zctrl)}")
+            for i, zctrl in enumerate(zctrls[4:8], start=5):
+                right_lines.append(f"K{i}: {self._format_zctrl(zctrl)}")
+        else:
+            left_lines.append("No active params")
+            right_lines.append("Add/select a chain")
+        right_lines.extend([
+            "Top CCs: system-owned",
+            "CC pass-through: manual only",
+            self._event_status_line(),
+        ])
+        controls = self._top_button_legend()
+        return controls, left_lines, controls, right_lines
+
+    def _build_transport_page(self):
+        left_lines = [
+            "Play: toggle audio play",
+            "Stop: stop audio play",
+            "Record: toggle audio rec",
+            "Clear: all notes off",
+            "Click: ALSA mixer screen",
+            "Loop: display page",
+            self._event_status_line(),
+        ]
+        right_lines = [
+            "4D / encoder:",
+            "  Left/Right arrows",
+            "  Up/Down arrows",
+            "Preset +/-: up/down",
+            "Plugin/MIDI: param bank",
+            f"Param bank: {self._param_bank + 1}",
+            f"Last CUIA: {self._last_cuia}",
+        ]
+        return self._top_button_legend(), left_lines, self._top_button_legend(), right_lines
+
+    def _build_routing_page(self):
+        left_lines = [
+            "MIDI 1: keybed -> chains",
+            "MIDI 2: ctrldev target",
+            "HID: buttons/encoder/knobs",
+            "USB IF3: dual displays",
+            "No Mackie dependency",
+            "No NI host required",
+            self._event_status_line(),
+        ]
+        right_lines = [
+            "Clock rig target:",
+            "Hapax OR BeatClock master",
+            "TR-8S follows master",
+            "Avoid clock loops",
+            "S88 controls active chain",
+            "MIDI 1 must stay playable",
+            f"Page {self._display_page + 1}/{self._display_page_count}",
+        ]
+        return self._top_button_legend(), left_lines, self._top_button_legend(), right_lines
+
+    def _top_button_legend(self):
+        return "Top: Bank- Bank+  ←  →  ↑  ↓  Page Panic"
+
+    def _remember_event(self, event, cuia="-"):
+        self._last_event = f"{event.kind}:{event.name}={event.value}"
+        self._last_cuia = cuia or "-"
+        self._last_action_time = time.monotonic()
+
+    def _event_status_line(self):
+        age = max(0.0, time.monotonic() - self._last_action_time)
+        return f"Last: {self._last_event[:26]} {age:.1f}s"
+
+    def _send_cuia(self, cuia):
+        self._last_cuia = cuia or "-"
+        self.state_manager.send_cuia(cuia)
+
+    def _cycle_display_page(self, delta=1):
+        self._display_page = (self._display_page + delta) % self._display_page_count
+        active = ['loop']
+        if self._display_page == 0:
+            active.extend(['plugin', 'midi'])
+        elif self._display_page == 1:
+            active.extend(['play', 'stop', 'record'])
+        elif self._display_page == 2:
+            active.extend(['page_left', 'page_right'])
+        self._apply_button_lights(active)
+        self.refresh(force=True)
+
+    def _apply_button_lights(self, active=None):
+        if not self.bridge:
+            return
+        try:
+            if hasattr(self.bridge, 'set_cockpit_lights'):
+                self.bridge.set_cockpit_lights(active=active)
+            else:
+                self.bridge.wake()
+        except Exception as e:
+            logging.debug("S88 button light update failed => %s", e)
 
     def _get_active_context(self):
         title = "-"
@@ -190,8 +336,16 @@ class zynthian_ctrldev_komplete_kontrol_s88_mk2(zynthian_ctrldev_base):
             if getattr(zctrl, "is_path", False):
                 continue
             zctrls.append(zctrl)
-        zctrls.sort(key=lambda z: (-getattr(z, "display_priority", 0), getattr(z, "name", getattr(z, "symbol", ""))))
+        zctrls.sort(key=self._zctrl_sort_key)
         return zctrls
+
+    @staticmethod
+    def _natural_key(text):
+        return [int(part) if part.isdigit() else part.lower() for part in re.split(r"(\d+)", str(text or ""))]
+
+    def _zctrl_sort_key(self, zctrl):
+        name = getattr(zctrl, "short_name", None) or getattr(zctrl, "name", None) or getattr(zctrl, "symbol", "")
+        return (-getattr(zctrl, "display_priority", 0), self._natural_key(name))
 
     def _get_bank_zctrls(self):
         zctrls = self._get_param_zctrls()
@@ -242,16 +396,23 @@ class zynthian_ctrldev_komplete_kontrol_s88_mk2(zynthian_ctrldev_base):
     def _handle_hid_event(self, event):
         logging.debug("S88 HID event kind=%s name=%s value=%s", event.kind, event.name, event.value)
         if event.kind == "button":
+            if event.name == "loop":
+                self._remember_event(event, "DISPLAY_PAGE")
+                self._cycle_display_page(1)
+                return
             if event.name == "plugin":
+                self._remember_event(event, "BANK_NEXT")
                 self._change_param_bank(1)
                 return
             if event.name == "midi":
+                self._remember_event(event, "BANK_PREV")
                 self._change_param_bank(-1)
                 return
             cuia = self.CUIA_MAP.get(event.name)
+            self._remember_event(event, cuia or "-")
             if cuia:
-                self.state_manager.send_cuia(cuia)
-                self.refresh()
+                self._send_cuia(cuia)
+                self.refresh(force=True)
         elif event.kind == "encoder":
             # Coarse v0 mapping: encoder state acts as UI navigation.
             cuia = {
@@ -260,14 +421,21 @@ class zynthian_ctrldev_komplete_kontrol_s88_mk2(zynthian_ctrldev_base):
                 "encoder_state_0x80": "ARROW_UP",
                 "encoder_state_0xc0": "ARROW_DOWN",
             }.get(event.name)
+            self._remember_event(event, cuia or "-")
             if cuia:
-                self.state_manager.send_cuia(cuia)
-                self.refresh()
+                self._send_cuia(cuia)
+                self.refresh(force=True)
+        elif event.kind == "knob_touch":
+            # Capacitive knob touch is intentionally ignored for now.
+            # Only knob turns should affect Zynthian state.
+            return
         elif event.kind == "knobs8":
+            self._remember_event(event, "PARAM_KNOBS")
             self._handle_knobs8(event.value)
         elif event.kind == "knob":
             # Some S88 states only expose a coarse byte-30 stream; treat it as a nudge
             # on the first visible parameter until we map per-knob IDs from longer packets.
+            self._remember_event(event, "PARAM_NUDGE")
             self._handle_single_knob(event.value)
 
     def _change_param_bank(self, delta):
@@ -277,7 +445,7 @@ class zynthian_ctrldev_komplete_kontrol_s88_mk2(zynthian_ctrldev_base):
         else:
             max_bank = max(0, (len(zctrls) - 1) // 8)
             self._param_bank = max(0, min(max_bank, self._param_bank + delta))
-        self.refresh()
+        self.refresh(force=True)
 
     def _handle_knobs8(self, values):
         if not isinstance(values, list):
@@ -298,7 +466,7 @@ class zynthian_ctrldev_komplete_kontrol_s88_mk2(zynthian_ctrldev_base):
                 continue
             self._set_zctrl_from_7bit(zctrls[i], raw_val)
         self._last_knobs8 = list(values)
-        self.refresh()
+        self.refresh(force=True)
 
     def _handle_single_knob(self, value):
         zctrls = self._get_bank_zctrls()
@@ -312,7 +480,7 @@ class zynthian_ctrldev_komplete_kontrol_s88_mk2(zynthian_ctrldev_base):
         delta = 1 if ((value - last) & 0x7f) < 64 else -1
         try:
             zctrls[0].nudge(delta)
-            self.refresh()
+            self.refresh(force=True)
         except Exception as e:
             logging.debug("S88 single-knob nudge failed => %s", e)
 

@@ -39,6 +39,7 @@ from zyngine.zynthian_processor import zynthian_processor
 from zyngine.zynthian_engine_grooveslap import zynthian_engine_grooveslap
 from zyngine.zynthian_engine_beatclock import zynthian_engine_beatclock
 from zyngine.zynthian_engine_airplay import zynthian_engine_airplay
+from zyngine.zynthian_engine_dmx import zynthian_engine_dmx
 from zyngui import zynthian_gui_config
 
 # ----------------------------------------------------------------------------
@@ -79,7 +80,8 @@ engine2class = {
     'IR': zynthian_engine_inet_radio,
     'GS': zynthian_engine_grooveslap,
     'BC': zynthian_engine_beatclock,
-    'AR': zynthian_engine_airplay
+    'AR': zynthian_engine_airplay,
+    'DM': zynthian_engine_dmx
 }
 
 # ----------------------------------------------------------------------------

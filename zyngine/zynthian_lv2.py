@@ -105,6 +105,7 @@ engine_categories = {
         "Other"
     ),
     "Special": (
+        "Lighting",
         "Language",
         "Patchbay",
         "Sampler",
@@ -168,7 +169,8 @@ standalone_engine_info = {
     'MD': ["MOD-UI", "MOD-UI - Plugin Host", "Special", "Language", True],
     'GS': ["GrooveSlap", "GrooveSlap Live - Harmonic Animation", "MIDI Tool", "Other", True],
     'BC': ["BeatClock", "BeatClock - Audio to MIDI Clock", "Special", "Other", True],
-    'AR': ["AirPlay", "AirPlay Audio Receiver", "Audio Generator", "Other", True]
+    'AR': ["AirPlay", "AirPlay Audio Receiver", "Audio Generator", "Other", True],
+    'DM': ["DMX Laser", "DMX Laser - Audio-Reactive Lighting", "Special", "Lighting", True]
 }
 
 rpi5_plugins = [

@@ -252,14 +252,28 @@ def get_midi_in_uid(idev):
 
 
 def get_midi_in_devid(idev):
-    """Get the ALSA name of the port connected to ZMIP port
+    """Get the ALSA/friendly name of the port connected to ZMIP port
 
     idev : Index of ZMIP port
-    returns : ALSA name or None if not found
+    returns : ALSA/friendly name or None if not found
     """
 
     try:
-        return devices_in[idev].aliases[0].split('/', 1)[1]
+        aliases = devices_in[idev].aliases
+        uid = aliases[0]
+        uid_parts = uid.split('/', 1)
+        if len(uid_parts) > 1:
+            return uid_parts[1]
+        if len(aliases) > 1:
+            # Some bridges like a2j expose aliases as:
+            #   "KOMPLETE KONTROL S88 MK2 [20] (capture): KOMPLETE KONTROL S88 MK2 MIDI 2"
+            # Use the friendly device suffix after the JACK-style colon so exact ctrldev
+            # dev_ids can match across reboot-varying ALSA client numbers.
+            alias = aliases[1]
+            if ": " in alias:
+                return alias.rsplit(": ", 1)[1]
+            return alias
+        return uid
     except:
         return None
 
